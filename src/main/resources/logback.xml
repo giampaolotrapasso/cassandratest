@@ -7,11 +7,15 @@
         </layout>
     </appender>
 
-    <root level="info">
+    <root level="INFO">
         <appender-ref ref="STDOUT" />
     </root>
 
+    <logger name="com.datastax.driver.core" level="INFO" />
+
     <statusListener class="ch.qos.logback.core.status.NopStatusListener" />
+
+
 
 
 
