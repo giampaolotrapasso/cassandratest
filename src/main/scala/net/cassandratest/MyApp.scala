@@ -35,7 +35,7 @@ object MyApp extends LazyLogging {
   def main(args: Array[String]): Unit = {
     createSchema(client.session)
 
-    val statement = client.session.prepare("INSERT INTO blobTest.store(uuid, bucket, start, end, data) VALUES (?, ?, ?, ?, ?) if not exists;")
+    val statement = client.session.prepare("INSERT INTO blobTest.store(uuid, bucket, start, end, data) VALUES (?, ?, ?, ?, ?);")
 
     val blob = new Array[Byte](MyConfig.blobSize)
     scala.util.Random.nextBytes(blob)
@@ -48,7 +48,9 @@ object MyApp extends LazyLogging {
       blob,
       statement)
 
-    logger.info(s"Time needed ${(System.currentTimeMillis() - time) / 1000d}s")
+    val elapsed = (System.currentTimeMillis() - time)
+    val size = MyConfig.recordNumber*MyConfig.blobSize
+    logger.info(s"Time needed ${elapsed / 1000.0}s, ${size/1000.0 / elapsed}, size $size MB")
 
     client.cluster.close()
 
