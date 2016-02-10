@@ -1,10 +1,12 @@
 package net.cassandratest
 
-import java.io.IOException
+import java.io.{RandomAccessFile, IOException}
 import java.nio.ByteBuffer
+import java.nio.file.{Files, Paths}
 import java.util.{UUID, ArrayList}
 
 import com.datastax.driver.core.exceptions.WriteTimeoutException
+import com.datastax.driver.core.policies.{TokenAwarePolicy, RoundRobinPolicy}
 import com.datastax.driver.core.{PoolingOptions, Row, ProtocolVersion, PreparedStatement, ResultSet, ResultSetFuture, Session, BoundStatement, Cluster}
 import com.google.common.util.concurrent.{FutureCallback, Futures}
 import com.typesafe.scalalogging.LazyLogging
@@ -15,15 +17,20 @@ class Database(node: String) extends LazyLogging {
 
   val poolingOptions = new PoolingOptions()
 
-  val cluster = Cluster.builder.addContactPoint(node)
+
+  var clusterBuilder = Cluster.builder.addContactPoint(node)
     .withProtocolVersion(ProtocolVersion.NEWEST_SUPPORTED)
     .withPoolingOptions(poolingOptions)
-    .build
+
+  if (MyConfig.tokenAwareDriver)
+    clusterBuilder = clusterBuilder.withLoadBalancingPolicy((new TokenAwarePolicy(new RoundRobinPolicy())))
+
+  val cluster = clusterBuilder.build
 
   val session = cluster.newSession()
 }
 
-case class Record(uuid: UUID, bytes: Array[Byte], bucket: Int, start: Int, end: Int)
+case class Record(uuid: UUID, bytes: Array[Byte], bucket: Int, start: Int, end: Int, offset: Int, length: Int)
 
 
 object MyApp extends LazyLogging {
@@ -35,22 +42,27 @@ object MyApp extends LazyLogging {
   def main(args: Array[String]): Unit = {
     createSchema(client.session)
 
+    println("parameters "+ MyConfig.config.toString)
+
     val statement = client.session.prepare("INSERT INTO blobTest.store(uuid, bucket, start, end, data) VALUES (?, ?, ?, ?, ?);")
 
-    val blob = new Array[Byte](MyConfig.blobSize)
-    scala.util.Random.nextBytes(blob)
+    var time = System.currentTimeMillis
+    val byteArray: Array[Byte] = Files.readAllBytes(Paths.get(MyConfig.fileName))
+    var elapsed = System.currentTimeMillis - time
+    val size = byteArray.length
+    val mbSize = size / 1000000.0
+    logger.info(s"Time needed to read ${elapsed / 1000.0}s, ${size / 1000.0 / elapsed}, size ${mbSize} MB")
 
-    val time = System.currentTimeMillis()
+    time = System.currentTimeMillis
     write(client,
-      numberOfRecords = MyConfig.recordNumber,
       bucketSize = MyConfig.bucketSize,
+      chunkSize = MyConfig.chunkSize,
       maxConcurrentWrites = MyConfig.maxFutures,
-      blob,
+      byteArray,
       statement)
+    elapsed = System.currentTimeMillis - time
 
-    val elapsed = (System.currentTimeMillis() - time)
-    val size = MyConfig.recordNumber*MyConfig.blobSize
-    logger.info(s"Time needed ${elapsed / 1000.0}s, ${size/1000.0 / elapsed}, size $size MB")
+    logger.info(s"Time needed to write ${elapsed / 1000.0}s, ${size / 1000.0 / elapsed}Mb/s, size $mbSize MB")
 
     client.cluster.close()
 
@@ -96,24 +108,33 @@ object MyApp extends LazyLogging {
   }
 
 
-  def write(database: Database, numberOfRecords: Int, bucketSize: Int, maxConcurrentWrites: Int,
+  def write(database: Database, bucketSize: Int, chunkSize: Int, maxConcurrentWrites: Int,
             blob: Array[Byte], statement: PreparedStatement): Unit = {
 
     val uuid: UUID = UUID.randomUUID()
     var count = 0;
 
+    var size = 0
+
+
+    val numberOfRecords = (blob.size / chunkSize) +1
+
     //Javish loop
-    while (count < numberOfRecords) {
+    while (size < blob.size) {
+      val len = Math.min(chunkSize, blob.length-size)
+
       val record = Record(
         uuid = uuid,
         bucket = count / bucketSize,
-        start = ((count % bucketSize)) * blob.length,
-        end = ((count % bucketSize) + 1) * blob.length,
-        bytes = blob
+        start = ((count % bucketSize)) * chunkSize,
+        end = ((count % bucketSize) + 1) * chunkSize,
+        bytes = blob,
+        offset = count * chunkSize,
+        length = len
       )
 
       asynchWrite(database, maxConcurrentWrites, statement, record)
-
+      size += len
       count += 1
     }
 
@@ -128,7 +149,7 @@ object MyApp extends LazyLogging {
       .setLong(1, record.bucket)
       .setLong(2, record.start)
       .setLong(3, record.end)
-      .setBytes(4, ByteBuffer.wrap(record.bytes)))
+      .setBytes(4, ByteBuffer.wrap(record.bytes, record.offset, record.length)))
 
     if (futures.size() > maxConcurrentWrites)
       waitDbWrites()
