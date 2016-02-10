@@ -15,6 +15,8 @@ object MyConfig {
 
   def maxFutures = config.getInt("test.settings.maxfutures")
 
+  def readbufferSize = config.getInt("test.settings.readbuffersize")
+
   def serverName = config.getString("test.settings.servername")
   def fileName = config.getString("test.settings.filename")
 

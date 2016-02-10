@@ -15,7 +15,8 @@ libraryDependencies ++= Seq(
   "com.datastax.cassandra"             % "cassandra-driver-core"            % driverCore,
   "com.typesafe.scala-logging"        %% "scala-logging"                    % "3.1.0",
   "io.netty"                           % "netty-all"                        % "4.0.33.Final" force(),
-  "com.typesafe"                         % "config"                         % "1.3.0")
+  "com.typesafe"                         % "config"                         % "1.3.0",
+"com.typesafe.akka"                  % "akka-actor_2.11"                  % "2.3.14")
 
 // Uncomment to use Akka
 //libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.3.11"
