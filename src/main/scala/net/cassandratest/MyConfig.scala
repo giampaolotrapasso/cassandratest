@@ -6,6 +6,8 @@ import com.typesafe.config.ConfigFactory
 
 object MyConfig {
 
+
+
   val default = ConfigFactory.load()
   val config = ConfigFactory.parseFile(new File("test.conf")).withFallback(default)
 
@@ -21,11 +23,19 @@ object MyConfig {
   def fileName = config.getString("test.settings.filename")
 
   def tokenAwareDriver = config.getBoolean("test.settings.tokenawaredriver")
+
+  def connectionNumber = config.getInt("test.settings.connectionNumber")
+
+  def maxConnectionNumber = config.getInt("test.settings.maxConnectionNumber")
+
+  def maxRequestsPerConnection: Int = config.getInt("test.settings.maxRequestsPerConnection")
+
+  def cycles = config.getInt("test.settings.cycles")
   
 
   // unused, yet
-  def connectionNumber = config.getInt("test.settings.connectionNumber")
-  def maxConnectionNumber = config.getInt("test.settings.maxConnectionNumber")
+
+
 
 
 
