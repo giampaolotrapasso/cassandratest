@@ -11,27 +11,32 @@ object MyConfig {
   val default = ConfigFactory.load()
   val config = ConfigFactory.parseFile(new File("test.conf")).withFallback(default)
 
-  def chunkSize = config.getInt("test.settings.chunkSize")
+  lazy val chunkSize = config.getInt("test.settings.chunkSize")
 
-  def bucketSize = config.getInt("test.settings.bucketsize")
+  lazy val bucketSize = config.getInt("test.settings.bucketsize")
 
-  def maxFutures = config.getInt("test.settings.maxfutures")
+  lazy val  maxFutures = config.getInt("test.settings.maxfutures")
 
-  def readbufferSize = config.getInt("test.settings.readbuffersize")
+  lazy val  readbufferSize = config.getInt("test.settings.readbuffersize")
 
-  def serverName = config.getString("test.settings.servername")
-  def fileName = config.getString("test.settings.filename")
+  lazy val  serverName = config.getString("test.settings.servername")
+  lazy val  fileName = config.getString("test.settings.filename")
 
-  def tokenAwareDriver = config.getBoolean("test.settings.tokenawaredriver")
+  lazy val  tokenAwareDriver = config.getBoolean("test.settings.tokenawaredriver")
 
-  def connectionNumber = config.getInt("test.settings.connectionNumber")
+  lazy val  connectionNumber = config.getInt("test.settings.connectionNumber")
 
-  def maxConnectionNumber = config.getInt("test.settings.maxConnectionNumber")
+  lazy val  maxConnectionNumber = config.getInt("test.settings.maxConnectionNumber")
 
-  def maxRequestsPerConnection: Int = config.getInt("test.settings.maxRequestsPerConnection")
+  lazy val  maxRequestsPerConnection: Int = config.getInt("test.settings.maxRequestsPerConnection")
 
-  def cycles = config.getInt("test.settings.cycles")
-  
+  lazy val  cycles = config.getInt("test.settings.cycles")
+  lazy val  poolsize = config.getInt("test.settings.poolsize")
+
+  lazy val  keyspace = config.getString("test.settings.keyspace")
+
+  lazy val  tableName = config.getString("test.settings.tablename")
+
 
   // unused, yet
 
