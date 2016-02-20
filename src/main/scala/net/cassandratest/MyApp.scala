@@ -1,71 +1,163 @@
 package net.cassandratest
 
-import java.io.{RandomAccessFile, IOException}
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
-import java.nio.file.{Files, Paths}
-import java.util.{UUID, ArrayList}
+import java.util.UUID
+import java.util.concurrent.Executors
 
-import com.datastax.driver.core.exceptions.WriteTimeoutException
-import com.datastax.driver.core.policies.{TokenAwarePolicy, RoundRobinPolicy}
-import com.datastax.driver.core.{PoolingOptions, Row, ProtocolVersion, PreparedStatement, ResultSet, ResultSetFuture, Session, BoundStatement, Cluster}
-import com.google.common.util.concurrent.{FutureCallback, Futures}
+import com.datastax.driver.core.{Cluster, HostDistance, PoolingOptions, PreparedStatement, ProtocolVersion, ResultSet, ResultSetFuture, Session}
+import com.google.common.util.concurrent.{MoreExecutors, ListeningExecutorService}
 import com.typesafe.scalalogging.LazyLogging
 
+import scala.concurrent.duration._
+import scala.concurrent.{Future => SFuture, ExecutionContext, Await}
 import scala.util.Try
 
 class Database(node: String) extends LazyLogging {
 
   val poolingOptions = new PoolingOptions()
+    .setConnectionsPerHost(
+      HostDistance.LOCAL, MyConfig.connectionNumber, MyConfig.maxConnectionNumber)
+    .setConnectionsPerHost(
+      HostDistance.REMOTE, MyConfig.connectionNumber, MyConfig.maxConnectionNumber)
+    .setMaxRequestsPerConnection(
+      HostDistance.LOCAL, MyConfig.maxRequestsPerConnection)
+    .setMaxRequestsPerConnection(
+      HostDistance.REMOTE, MyConfig.maxRequestsPerConnection)
+    .setPoolTimeoutMillis(200000)
 
 
   var clusterBuilder = Cluster.builder.addContactPoint(node)
     .withProtocolVersion(ProtocolVersion.NEWEST_SUPPORTED)
     .withPoolingOptions(poolingOptions)
-
-  if (MyConfig.tokenAwareDriver)
-    clusterBuilder = clusterBuilder.withLoadBalancingPolicy((new TokenAwarePolicy(new RoundRobinPolicy())))
+    .withProtocolVersion(ProtocolVersion.NEWEST_SUPPORTED)
 
   val cluster = clusterBuilder.build
 
   val session = cluster.newSession()
 }
 
-case class Record(uuid: UUID, bytes: Array[Byte], bucket: Int, start: Int, end: Int, offset: Int, length: Int)
+case class Record(uuid: UUID, bytes: Array[Byte], start: Int, end: Int, offset: Int, length: Int)
 
+case class FileInfo(size: Long, chunks: Int)
 
-object MyApp extends LazyLogging {
+object MyApp extends LazyLogging with FutureHelper {
 
-  val futures = new ArrayList[ResultSetFuture]()
+  var futures = List[SFuture[ResultSet]]()
   val client = new Database(MyConfig.serverName)
+  var writeResults = List[Double]()
+  var readResults = List[Double]()
+
+  var allocationResults = List[Double]()
+  var bindResult = List[Double]()
+  var executeResult = List[Double]()
+  var writeCounter = 0
+
+  var bindTime = 0d
+  var executeWithAsynchTime = 0d
+
+  implicit val s = client.session
+
+  var time = System.currentTimeMillis()
+
+  val threadPool = Executors.newFixedThreadPool(MyConfig.poolsize)
+
+  implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(threadPool)
+
+  implicit val executor: ListeningExecutorService = MoreExecutors.listeningDecorator(threadPool)
+
+
+  private def getFileInfo(bigDataFilePath: String) = {
+    val randomAccessFile = new RandomAccessFile(bigDataFilePath, "r")
+    try {
+      FileInfo(randomAccessFile.length,
+        (randomAccessFile.length / MyConfig.readbufferSize.toDouble).ceil.toInt)
+    } finally {
+      randomAccessFile.close
+    }
+  }
 
 
   def main(args: Array[String]): Unit = {
-    createSchema(client.session)
 
-    println("parameters "+ MyConfig.config.toString)
+    val tableName = MyConfig.tableName
+    val keyspace = MyConfig.keyspace
 
-    val statement = client.session.prepare("INSERT INTO blobTest.store(uuid, bucket, start, end, data) VALUES (?, ?, ?, ?, ?);")
+    createSchema(client.session, keyspace, tableName)
 
-    var time = System.currentTimeMillis
-    val byteArray: Array[Byte] = Files.readAllBytes(Paths.get(MyConfig.fileName))
-    var elapsed = System.currentTimeMillis - time
-    val size = byteArray.length
-    val mbSize = size / 1000000.0
-    logger.info(s"Time needed to read ${elapsed / 1000.0}s, ${size / 1000.0 / elapsed}, size ${mbSize} MB")
+    val statement = client.session.prepare(s"INSERT INTO $keyspace.$tableName(uuid, start, end, data) VALUES (?, ?, ?, ?);")
+    val fileInfo = getFileInfo(MyConfig.fileName)
 
-    time = System.currentTimeMillis
-    write(client,
-      bucketSize = MyConfig.bucketSize,
-      chunkSize = MyConfig.chunkSize,
-      maxConcurrentWrites = MyConfig.maxFutures,
-      byteArray,
-      statement)
-    elapsed = System.currentTimeMillis - time
+    var fileSize = 0
+    val readBufferSize = MyConfig.readbufferSize
 
-    logger.info(s"Time needed to write ${elapsed / 1000.0}s, ${size / 1000.0 / elapsed}Mb/s, size $mbSize MB")
 
+    var i = 0;
+
+    while (i < MyConfig.cycles) {
+      writeCounter = 0
+      time = System.currentTimeMillis
+      val raf = new RandomAccessFile(MyConfig.fileName, "r")
+      val uuid: UUID = UUID.randomUUID()
+      var readTime = 0d
+      var allocationTime = 0d
+      try {
+        val byteBuffer = new Array[Byte](readBufferSize)
+
+        bindTime = 0
+        executeWithAsynchTime = 0d
+
+        for (chunkIndex <- 1 to fileInfo.chunks) {
+
+          val seek = (chunkIndex - 1) * readBufferSize
+          val timeStartRead = System.currentTimeMillis
+          raf.seek(seek)
+          val readSize = raf.read(byteBuffer)
+          readTime += (System.currentTimeMillis - timeStartRead).toDouble
+
+          val timeAllocationStarted = System.currentTimeMillis()
+          write(client,
+            chunkSize = MyConfig.chunkSize,
+            byteBuffer.array,
+            statement, readSize)
+          allocationTime += System.currentTimeMillis() - timeAllocationStarted
+        }
+      }
+      finally {
+        raf.close
+      }
+      val list = SFuture.sequence(futures)
+      Await.ready(list, 60 seconds)
+
+
+      val writeTime = (System.currentTimeMillis - time).toDouble
+      writeResults = writeResults :+ writeTime
+      bindResult = bindResult :+ bindTime
+      readResults = readResults :+ readTime
+      allocationResults = allocationResults :+ allocationTime
+      executeResult = executeResult :+ executeWithAsynchTime
+
+      i += 1
+
+    }
+    val mbSize = fileInfo.size / 1000000.0
+    val bufferMbSize = MyConfig.readbufferSize / 1000000.0
+
+    val allocationSpeeds = allocationResults.map(x => bufferMbSize / (x / 1000))
+    val writeSpeeds = writeResults.map(x => mbSize / (x / 1000))
+    val readSpeeds = readResults.map(x => mbSize / (x / 1000))
+
+    threadPool.shutdown()
+    client.session.close()
     client.cluster.close()
 
+    //logger.info(statistics("Alloc", allocationSpeeds, bufferMbSize))
+    logger.info(statistics(" Read", readSpeeds, mbSize))
+    logger.info(statistics("Total", writeSpeeds, mbSize))
+
+    writeResults.zip(readResults).zip(allocationResults).zip(bindResult).zip(executeResult).foreach { case ((((write, read), allocate), bind), execute) =>
+      logger.info(f"read: ${read / 1000d}%2.2fs, bind+async ${allocate / 1000d}%2.2f, bind ${bind / 1000d}%2.2f, execute ${execute / 1000d}%2.2f total ${write / 1000d}%2.2f")
+    }
   }
 
   def createSchema(session: Session): Unit = {
@@ -74,42 +166,49 @@ object MyApp extends LazyLogging {
         |DROP KEYSPACE blobTest;
       """.stripMargin))
 
+  }
 
-    session.execute( """
-                   CREATE KEYSPACE IF NOT EXISTS blobTest
+  def statistics(operation: String, list: List[Double], mbSize: Double): String = {
+    val maxSpeed = list.max[Double]
+    val minSpeed = list.min[Double]
+    val avgSpeed = list.sum / writeResults.size
+    val variSpeed = (list.map(x => x - avgSpeed).map(y => y * y).sum) / list.size
+    val devTime = Math.sqrt(variSpeed)
+    f"${operation}: ${list.size}, file size ${mbSize}%2.2f Mb, speed: min ${minSpeed}%2.2f Mb/s, max ${maxSpeed}%2.2f Mb/s, avg ${avgSpeed}%2.2f Mb/s, std dev ${devTime}%2.2f"
+  }
+
+  def clean(session: Session, tableName: String) = {
+    session.execute(s"TRUNCATE ${tableName}")
+  }
+
+  def createSchema(session: Session, keyspace: String, tableName: String): Unit = {
+
+
+    session.execute( s"""
+                   CREATE KEYSPACE IF NOT EXISTS $keyspace
                    WITH replication = {'class':'SimpleStrategy', 'replication_factor':1};"""
       .stripMargin
     )
 
     session.execute(
-      """
-        |USE  blobTest;
+      s"""
+         |USE  ${keyspace};
       """.stripMargin)
 
     session.execute(
-      """CREATE TABLE store (
-        |    uuid uuid,
-        |    bucket bigint,
-        |    start bigint,
-        |    end bigint,
-        |    data blob,
-        |    PRIMARY KEY ((uuid, bucket), start)
-        |) WITH CLUSTERING ORDER BY (start ASC);
-        | """.stripMargin)
-  }
-
-  def waitDbWrites(): Unit = {
-    while (futures.size() > 0) {
-      // Wait for the other write requests to terminate
-      val future = futures.get(0);
-      val r = future.getUninterruptibly
-      futures.remove(0)
-    }
+      s"""CREATE TABLE IF NOT EXISTS ${tableName} (
+                                                   |uuid uuid,
+                                                   |start bigint,
+                                                   |end bigint,
+                                                   |data blob,
+                                                   |PRIMARY KEY (uuid)
+                                                   |);
+                                                   | """.stripMargin)
   }
 
 
-  def write(database: Database, bucketSize: Int, chunkSize: Int, maxConcurrentWrites: Int,
-            blob: Array[Byte], statement: PreparedStatement): Unit = {
+  def write(database: Database, chunkSize: Int,
+            blob: Array[Byte], statement: PreparedStatement, readSize: Long): Unit = {
 
     val uuid: UUID = UUID.randomUUID()
     var count = 0;
@@ -117,56 +216,42 @@ object MyApp extends LazyLogging {
     var size = 0
 
 
-    val numberOfRecords = (blob.size / chunkSize) +1
+    val numberOfRecords = (blob.size / chunkSize) + 1
 
     //Javish loop
     while (size < blob.size) {
-      val len = Math.min(chunkSize, blob.length-size)
+      val len = Math.min(chunkSize, blob.length - size)
 
       val record = Record(
         uuid = uuid,
-        bucket = count / bucketSize,
-        start = ((count % bucketSize)) * chunkSize,
-        end = ((count % bucketSize) + 1) * chunkSize,
+        start = size,
+        end = size + len,
         bytes = blob,
         offset = count * chunkSize,
         length = len
       )
 
-      asynchWrite(database, maxConcurrentWrites, statement, record)
+      asynchWrite(database, 1, statement, record)
       size += len
       count += 1
     }
 
-    waitDbWrites()
 
   }
 
 
   def asynchWrite(database: Database, maxConcurrentWrites: Int, statement: PreparedStatement, record: Record): Unit = {
-    val f: ResultSetFuture = database.session.executeAsync(statement.bind()
+
+    val f = executeWithAsynch(statement.bind()
       .setUUID(0, record.uuid)
-      .setLong(1, record.bucket)
-      .setLong(2, record.start)
-      .setLong(3, record.end)
-      .setBytes(4, ByteBuffer.wrap(record.bytes, record.offset, record.length)))
+      .setLong(1, record.start)
+      .setLong(2, record.end)
+      .setBytes(3, ByteBuffer.wrap(record.bytes, record.offset, record.length)))
 
-    if (futures.size() > maxConcurrentWrites)
-      waitDbWrites()
+    futures = futures :+ f
 
-    futures.add(f)
-
-    Futures.addCallback(f, new FutureCallback[ResultSet] {
-
-      override def onFailure(t: Throwable): Unit = {
-        val to = t.asInstanceOf[WriteTimeoutException]
-        logger.error(s"Failed with: $t")
-      }
-
-      override def onSuccess(result: ResultSet): Unit = {}
-
-
-    })
   }
 }
+
+
 
